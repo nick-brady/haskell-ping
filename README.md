@@ -3,6 +3,8 @@ Educational ping program implemented with Haskell
 
 Program will send an ICMP (Internet Control Message Protocol) echo request to a specified interface on the network end, and then monitor a raw socket for an ICMP echo reply.
 
+Helpful high level overview of ping here: http://images.globalknowledge.com/wwwimages/whitepaperpdf/WP_Mays_Ping.pdf
+
 ## ICMP Echo Request
 From http://www.networksorcery.com/enp/protocol/icmp/msg8.htm#ICMP%20Header%20Checksum
 
