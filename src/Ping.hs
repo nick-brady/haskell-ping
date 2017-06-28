@@ -6,10 +6,16 @@ import Data.Binary.Put (Put, putWord8, putWord16be, putLazyByteString, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Network.Socket (Family(AF_INET), Socket, SocketType(Raw), SockAddr(SockAddrInet),addrAddress,addrFamily, addrProtocol, addrSocketType, ProtocolNumber, connect,isConnected, getAddrInfo, socket, close)
-import Network.Socket.ByteString (send, recv)
+import Network.Socket.ByteString (sendTo, recv)
 import System.Posix.Process (getProcessID)
 
 -- to run: >$ stack build && sudo stack exec hsping --allow-different-user
+
+-- Util function for testing binary
+toBinary :: Bits a => a -> [Char]
+toBinary x = fmap (\y -> if (testBit x (fromIntegral y)) then '1' else '0') [7,6..0]
+
+type PID = Word16
 
 icmpData :: BL.ByteString
 icmpData = let numBytes = 7
@@ -33,7 +39,7 @@ data ICMPRequest = ICMPRequest {
   , _data :: BL.ByteString
 }
 
-buildRequest :: Word16 -> BL.ByteString -> ICMPRequest
+buildRequest :: PID -> BL.ByteString -> ICMPRequest
 buildRequest pid lbs = ICMPRequest 8 0 0 pid 1 lbs
 
 icmpRequest :: ICMPRequest -> Put
@@ -48,16 +54,13 @@ icmpRequest icmp = do
 helloWorld :: IO()
 helloWorld = do
   pid <- getProcessID
-  _ <- putStrLn $ "-------------- Starting haskell ping service with Process ID " ++ (show pid) ++ " --------------"
+  _ <- putStrLn $ "--- Starting haskell ping service with Process ID " ++ (show pid) ++ " ---"
   sock <- socket AF_INET Raw icmpProtocol
   addrInfo <- getAddrInfo Nothing (Just "127.0.0.1") Nothing -- Don't need to provide hints, since only host matters.
   let sockAddress = addrAddress $ head addrInfo
-  connected <- connect sock (sockAddress)
   _ <- printConnected sock
   _ <- putStrLn $ "Data: " ++ (show $ icmpData)
   _ <- putStrLn $ "Socket Address: " ++ (show $ sockAddress)
-  bytesSent <- send sock $ (B.concat . BL.toChunks . runPut . icmpRequest) $ buildRequest (fromIntegral pid) icmpData
+  bytesSent <- sendTo sock ((B.concat . BL.toChunks . runPut . icmpRequest) $ buildRequest (fromIntegral pid) icmpData) sockAddress
   _ <- putStrLn $ "Number of Bytes Sent: " ++ (show bytesSent)
-  close sock -- We're done here, close the socket
-  _ <- printConnected sock
   putStrLn "goodbye"
