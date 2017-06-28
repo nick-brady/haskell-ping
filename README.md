@@ -33,7 +33,7 @@ From http://www.networksorcery.com/enp/protocol/icmp/msg8.htm#ICMP%20Header%20Ch
 
 **Code**. 8 bits. Cleared to 0.
 
-**ICMP Header Checksum**. 16 bits.
+**ICMP Header Checksum**. 16 bits. From *RFC 792*: 
 The 16-bit one's complement of the one's complement sum of the ICMP message, starting with the ICMP Type field. When the checksum is computed, the checksum field should first be cleared to 0. When the data packet is transmitted, the checksum is computed and inserted into this field. When the data packet is received, the checksum is again computed and verified against the checksum field. If the two checksums do not match then an error has occurred.
 
 **Identifier**. 16 bits.

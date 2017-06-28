@@ -1,14 +1,19 @@
 module Ping where
 
+import Data.Bits
 import Data.Word (Word8, Word16, Word32)
-import Data.Binary.Put (Put, putWord8, putWord16be, putWord32be, runPut)
+import Data.Binary.Put (Put, putWord8, putWord16be, putLazyByteString, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
-import Network.Socket (Family(AF_INET),Socket, SocketType(Raw), SockAddr(SockAddrInet),addrAddress,addrFamily,addrProtocol,addrSocketType, ProtocolNumber, connect,isConnected, getAddrInfo, socket, close)
+import Network.Socket (Family(AF_INET), Socket, SocketType(Raw), SockAddr(SockAddrInet),addrAddress,addrFamily, addrProtocol, addrSocketType, ProtocolNumber, connect,isConnected, getAddrInfo, socket, close)
 import Network.Socket.ByteString (send, recv)
 import System.Posix.Process (getProcessID)
 
 -- to run: >$ stack build && sudo stack exec hsping --allow-different-user
+
+icmpData :: BL.ByteString
+icmpData = let numBytes = 7
+           in BL.pack [1..(8*numBytes)]
 
 icmpProtocol :: ProtocolNumber
 icmpProtocol = 1
@@ -25,12 +30,11 @@ data ICMPRequest = ICMPRequest {
   , _checksum :: Word16
   , _identifier :: Word16
   , _sequence :: Word16
-  , _data :: Word32
+  , _data :: BL.ByteString
 }
 
-buildRequest :: Word16 -> ICMPRequest
-buildRequest pid = ICMPRequest 8 0 0 pid 1 0
-
+buildRequest :: Word16 -> BL.ByteString -> ICMPRequest
+buildRequest pid lbs = ICMPRequest 8 0 0 pid 1 lbs
 
 icmpRequest :: ICMPRequest -> Put
 icmpRequest icmp = do
@@ -39,7 +43,7 @@ icmpRequest icmp = do
   putWord16be $ _checksum icmp
   putWord16be $ _identifier icmp
   putWord16be $ _sequence icmp
-  putWord32be $ _data icmp
+  putLazyByteString $ _data icmp
 
 helloWorld :: IO()
 helloWorld = do
@@ -50,8 +54,9 @@ helloWorld = do
   let sockAddress = addrAddress $ head addrInfo
   connected <- connect sock (sockAddress)
   _ <- printConnected sock
+  _ <- putStrLn $ "Data: " ++ (show $ icmpData)
   _ <- putStrLn $ "Socket Address: " ++ (show $ sockAddress)
-  bytesSent <- send sock $ (B.concat . BL.toChunks . runPut . icmpRequest . buildRequest) $ fromIntegral pid
+  bytesSent <- send sock $ (B.concat . BL.toChunks . runPut . icmpRequest) $ buildRequest (fromIntegral pid) icmpData
   _ <- putStrLn $ "Number of Bytes Sent: " ++ (show bytesSent)
   close sock -- We're done here, close the socket
   _ <- printConnected sock
