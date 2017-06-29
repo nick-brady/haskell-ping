@@ -7,21 +7,22 @@ import Data.Binary.Put (Put, putWord8, putWord16be, putLazyByteString, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Network.Socket (Family(AF_INET), Socket, SocketType(Raw), SockAddr(SockAddrInet),addrAddress,addrFamily, addrProtocol, addrSocketType, ProtocolNumber, connect,isConnected, getAddrInfo, socket, close)
-import Network.Socket.ByteString (sendTo, recv)
+import Network.Socket.ByteString (sendTo, recvFrom)
 import System.Posix.Process (getProcessID)
 
 -- to run: >$ stack build && sudo stack exec hsping --allow-different-user
 
--- Util function for testing binary
-toBinary :: Bits a => a -> [Char]
-toBinary x = fmap (\y -> if (testBit x (fromIntegral y)) then '1' else '0') [7,6..0]
-
-type PID = Word16
+newtype PID = PID Word16
+newtype Sequence = Sequence Word16
+type PacketsSent = Int
+type PacketsReceived = Int
 
 icmpData :: BL.ByteString
 icmpData = let numBytes = 7
            in BL.pack [1..(8*numBytes)]
-
+           
+maxReceive = 2048 -- maximum number of bits to receive
+ipHeaderLength = 20 -- length of IP address header in bytes
 icmpProtocol :: ProtocolNumber
 icmpProtocol = 1
 
@@ -35,8 +36,21 @@ data ICMPRequest = ICMPRequest {
   , _data :: BL.ByteString
 }
 
-buildRequest :: PID -> BL.ByteString -> ICMPRequest
-buildRequest pid icmpdata = ICMPRequest 8 0 checksum pid 1 icmpdata
+-- getICMPHeader :: Get (Word8, Word8, Word16, Word16, Word16)
+-- getICMPHeader = do
+
+
+writeToBuffer :: ICMPRequest -> Put
+writeToBuffer icmp = do
+  putWord8 $ _type icmp
+  putWord8 $ _code icmp
+  putWord16be $ _checksum icmp
+  putWord16be $ _identifier icmp
+  putWord16be $ _sequence icmp
+  putLazyByteString $ _data icmp
+
+buildRequest :: PID -> Sequence -> BL.ByteString -> ICMPRequest
+buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid seq icmpdata
   where
     initialBuild :: ICMPRequest
     initialBuild = ICMPRequest 8 0 0 pid 1 icmpdata
@@ -71,14 +85,12 @@ buildRequest pid icmpdata = ICMPRequest 8 0 checksum pid 1 icmpdata
     checksum :: Word16
     checksum = complement $ eac
 
-writeToBuffer :: ICMPRequest -> Put
-writeToBuffer icmp = do
-  putWord8 $ _type icmp
-  putWord8 $ _code icmp
-  putWord16be $ _checksum icmp
-  putWord16be $ _identifier icmp
-  putWord16be $ _sequence icmp
-  putLazyByteString $ _data icmp
+pingHost :: Socket -> SockAddr -> PID -> Sequence -> IO()
+pingHost s sa pid seq = do
+  bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest pid seq icmpData) sa
+  -- (response, senderAddress) <- recvFrom s maxReceive
+  putStrLn $ "Number of Bytes Sent: " ++ (show bytesSent)
+  
 
 ping :: IO()
 ping = do
@@ -89,6 +101,5 @@ ping = do
   let sockAddress = addrAddress $ head addrInfo
   _ <- putStrLn $ "Data: " ++ (show $ icmpData)
   _ <- putStrLn $ "Socket Address: " ++ (show $ sockAddress)
-  bytesSent <- sendTo sock ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest (fromIntegral pid) icmpData) sockAddress
-  _ <- putStrLn $ "Number of Bytes Sent: " ++ (show bytesSent)
+  pingHost sock sockAddress (PID (fromIntegral pid)) (Sequence 0)
   putStrLn "goodbye"
