@@ -80,8 +80,8 @@ writeToBuffer icmp = do
   putWord16be $ _sequence icmp
   putLazyByteString $ _data icmp
 
-helloWorld :: IO()
-helloWorld = do
+ping :: IO()
+ping = do
   pid <- getProcessID
   _ <- putStrLn $ "--- Starting haskell ping service with Process ID " ++ (show pid) ++ " ---"
   sock <- socket AF_INET Raw icmpProtocol

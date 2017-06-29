@@ -4,4 +4,4 @@ import Ping
 
 main :: IO()
 main = do
-  helloWorld
+  ping
