@@ -61,11 +61,15 @@ buildRequest pid icmpdata = ICMPRequest 8 0 checksum pid 1 icmpdata
     values :: (Num a) => [a]
     values = map fromIntegral $ runGet splitBuffer ((maybeAddOctet . runPut . writeToBuffer) initialBuild)
 
-    total :: Word16
-    total = (sum values) + 4
+    total :: Word32
+    total = sum values -- 32 bit sum
+
+    low = fromIntegral $ total :: Word16  -- sum without carries
+    high = fromIntegral $ (total `shiftR` 16) :: Word16 -- sum of the carries
+    eac = low + high -- calculate end around carry
 
     checksum :: Word16
-    checksum = complement $ fromIntegral total
+    checksum = complement $ eac
 
 writeToBuffer :: ICMPRequest -> Put
 writeToBuffer icmp = do
