@@ -11,6 +11,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Network.Socket (Family(AF_INET), Socket, SocketType(Raw), SockAddr(SockAddrInet),addrAddress,addrFamily, addrProtocol, addrSocketType, ProtocolNumber, connect,isConnected, getAddrInfo, socket, close)
 import Network.Socket.ByteString (sendTo, recvFrom)
+import System.Environment (getArgs)
 import System.Posix.Process (getProcessID)
 
 -- to run: >$ stack build && sudo stack exec hsping --allow-different-user
@@ -123,15 +124,20 @@ pingHost s sa (PID pid) (Sequence seq) stats = do
   
 ping :: IO()
 ping = do
-  pid <- getProcessID
-  _ <- putStrLn $ "--- Starting haskell ping service with Process ID " ++ (show pid) ++ " ---"
-  sock <- socket AF_INET Raw icmpProtocol
-  addrInfo <- getAddrInfo Nothing (Just "127.0.0.1") Nothing -- Don't need to provide hints, since only host matters.
-  let sockAddress = addrAddress $ head addrInfo
-  stats <- newIORef $ Stats (PacketsSent 0) (PacketsReceived 0) 
-  pingHost sock sockAddress (PID (fromIntegral pid)) (Sequence 0) stats `finally` do
-    printStats sockAddress stats
-    putStrLn "goodbye"
+  args <- getArgs
+  if length args == 0 
+    then error "Please enter a host address to ping!"
+    else do
+      pid <- getProcessID
+      _ <- putStrLn $ "--- Starting haskell ping service with Process ID " ++ (show pid) ++ " ---"
+      sock <- socket AF_INET Raw icmpProtocol
+      let host = head args
+      addrInfo <- getAddrInfo Nothing (Just host) Nothing -- Don't need to provide hints, since only host matters.
+      let sockAddress = addrAddress $ head addrInfo
+      stats <- newIORef $ Stats (PacketsSent 0) (PacketsReceived 0) 
+      pingHost sock sockAddress (PID (fromIntegral pid)) (Sequence 0) stats `finally` do
+        printStats sockAddress stats
+        putStrLn "goodbye"
 
 printStats :: SockAddr -> IORef Stats -> IO()
 printStats sa s = do
