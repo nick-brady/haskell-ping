@@ -1,8 +1,9 @@
 module Ping where
 
+import Control.Concurrent (threadDelay)
 import Data.Bits
 import Data.Word (Word8, Word16, Word32)
-import Data.Binary.Get (Get, getWord16be, isEmpty, runGet)
+import Data.Binary.Get (Get, getWord8, getWord16be, isEmpty, runGet)
 import Data.Binary.Put (Put, putWord8, putWord16be, putLazyByteString, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -14,15 +15,16 @@ import System.Posix.Process (getProcessID)
 
 newtype PID = PID Word16
 newtype Sequence = Sequence Word16
-type PacketsSent = Int
-type PacketsReceived = Int
+newtype PacketsSent = PacketsSent Int
+newtype PacketsReceived = PacketsReceived Int
 
-icmpData :: BL.ByteString
-icmpData = let numBytes = 7
+icmpMockData :: BL.ByteString
+icmpMockData = let numBytes = 7
            in BL.pack [1..(8*numBytes)]
            
 maxReceive = 2048 -- maximum number of bits to receive
 ipHeaderLength = 20 -- length of IP address header in bytes
+icmpHeaderLength = 8 -- length of ICMP header in bytes
 icmpProtocol :: ProtocolNumber
 icmpProtocol = 1
 
@@ -36,9 +38,14 @@ data ICMPRequest = ICMPRequest {
   , _data :: BL.ByteString
 }
 
--- getICMPHeader :: Get (Word8, Word8, Word16, Word16, Word16)
--- getICMPHeader = do
-
+getICMPHeader :: Get (Word8, Word8, Word16, Word16, Word16)
+getICMPHeader = do
+  gType <- getWord8
+  gCode <- getWord8
+  gChecksum <- getWord16be
+  gIdentifier <- getWord16be
+  gSequence <- getWord16be
+  return (gType, gCode, gChecksum, gIdentifier, gSequence)
 
 writeToBuffer :: ICMPRequest -> Put
 writeToBuffer icmp = do
@@ -53,7 +60,7 @@ buildRequest :: PID -> Sequence -> BL.ByteString -> ICMPRequest
 buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid seq icmpdata
   where
     initialBuild :: ICMPRequest
-    initialBuild = ICMPRequest 8 0 0 pid 1 icmpdata
+    initialBuild = ICMPRequest 8 0 0 pid seq icmpdata
 
     -- "If the total length is odd, the received data is padded with one
     -- octet of zeros for computing the checksum." - RFC 792
@@ -85,13 +92,29 @@ buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid se
     checksum :: Word16
     checksum = complement $ eac
 
-pingHost :: Socket -> SockAddr -> PID -> Sequence -> IO()
-pingHost s sa pid seq = do
-  bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest pid seq icmpData) sa
-  -- (response, senderAddress) <- recvFrom s maxReceive
-  putStrLn $ "Number of Bytes Sent: " ++ (show bytesSent)
-  
 
+listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> PacketsSent -> PacketsReceived -> IO()
+listenForReply bytesSent s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received) = do
+  (response, senderAddress) <- recvFrom s maxReceive
+  let 
+    (_, ipData) = B.splitAt ipHeaderLength response  -- separate IP header from the response byte string
+    (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
+    (gType, gCode, gChecksum, gIdentifier, gSequence) = runGet getICMPHeader (BL.fromStrict icmpHeader)
+  case ((fromIntegral gIdentifier == pid) && sa == senderAddress) of
+    True -> do -- identifiers matched, this is the correct ICMP Reply
+      threadDelay $ (10^6) * 1
+      _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq)
+      pingHost s sa (PID pid) (Sequence (seq + 1)) (PacketsSent (sent + 1)) (PacketsReceived (received + 1))
+    False -> do -- was a different packet, continue listening
+      _ <- putStrLn $ "The identifier " ++ (show gIdentifier) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
+      listenForReply bytesSent s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received)
+
+
+pingHost :: Socket -> SockAddr -> PID -> Sequence -> PacketsSent -> PacketsReceived -> IO()
+pingHost s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received) = do
+  bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest (PID pid) (Sequence seq) icmpMockData) sa
+  listenForReply bytesSent s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received) 
+  
 ping :: IO()
 ping = do
   pid <- getProcessID
@@ -99,7 +122,5 @@ ping = do
   sock <- socket AF_INET Raw icmpProtocol
   addrInfo <- getAddrInfo Nothing (Just "127.0.0.1") Nothing -- Don't need to provide hints, since only host matters.
   let sockAddress = addrAddress $ head addrInfo
-  _ <- putStrLn $ "Data: " ++ (show $ icmpData)
-  _ <- putStrLn $ "Socket Address: " ++ (show $ sockAddress)
-  pingHost sock sockAddress (PID (fromIntegral pid)) (Sequence 0)
+  pingHost sock sockAddress (PID (fromIntegral pid)) (Sequence 0) (PacketsSent 0) (PacketsReceived 0)
   putStrLn "goodbye"
