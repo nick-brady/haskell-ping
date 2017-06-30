@@ -1,12 +1,14 @@
 module Ping where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception (finally)
 import Data.Bits
 import Data.Word (Word8, Word16, Word32)
 import Data.Binary.Get (Get, getWord8, getWord16be, isEmpty, runGet)
 import Data.Binary.Put (Put, putWord8, putWord16be, putLazyByteString, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Network.Socket (Family(AF_INET), Socket, SocketType(Raw), SockAddr(SockAddrInet),addrAddress,addrFamily, addrProtocol, addrSocketType, ProtocolNumber, connect,isConnected, getAddrInfo, socket, close)
 import Network.Socket.ByteString (sendTo, recvFrom)
 import System.Posix.Process (getProcessID)
@@ -37,6 +39,8 @@ data ICMPRequest = ICMPRequest {
   , _sequence :: Word16
   , _data :: BL.ByteString
 }
+
+data Stats = Stats PacketsSent PacketsReceived
 
 getICMPHeader :: Get (Word8, Word8, Word16, Word16, Word16)
 getICMPHeader = do
@@ -93,27 +97,29 @@ buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid se
     checksum = complement $ eac
 
 
-listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> PacketsSent -> PacketsReceived -> IO()
-listenForReply bytesSent s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received) = do
+listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
+listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
   (response, senderAddress) <- recvFrom s maxReceive
-  let 
+  (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef stats
+  let
     (_, ipData) = B.splitAt ipHeaderLength response  -- separate IP header from the response byte string
     (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
     (gType, gCode, gChecksum, gIdentifier, gSequence) = runGet getICMPHeader (BL.fromStrict icmpHeader)
   case ((fromIntegral gIdentifier == pid) && sa == senderAddress) of
-    True -> do -- identifiers matched, this is the correct ICMP Reply
+    True -> do -- identifiers and host matched, this is the correct ICMP Reply
+      writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
       threadDelay $ (10^6) * 1
       _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq)
-      pingHost s sa (PID pid) (Sequence (seq + 1)) (PacketsSent (sent + 1)) (PacketsReceived (received + 1))
+      pingHost s sa (PID pid) (Sequence (seq + 1)) stats
     False -> do -- was a different packet, continue listening
       _ <- putStrLn $ "The identifier " ++ (show gIdentifier) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
-      listenForReply bytesSent s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received)
+      listenForReply bytesSent s sa (PID pid) (Sequence seq) stats
 
 
-pingHost :: Socket -> SockAddr -> PID -> Sequence -> PacketsSent -> PacketsReceived -> IO()
-pingHost s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received) = do
+pingHost :: Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
+pingHost s sa (PID pid) (Sequence seq) stats = do
   bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest (PID pid) (Sequence seq) icmpMockData) sa
-  listenForReply bytesSent s sa (PID pid) (Sequence seq) (PacketsSent sent) (PacketsReceived received) 
+  listenForReply bytesSent s sa (PID pid) (Sequence seq) stats 
   
 ping :: IO()
 ping = do
@@ -122,5 +128,15 @@ ping = do
   sock <- socket AF_INET Raw icmpProtocol
   addrInfo <- getAddrInfo Nothing (Just "127.0.0.1") Nothing -- Don't need to provide hints, since only host matters.
   let sockAddress = addrAddress $ head addrInfo
-  pingHost sock sockAddress (PID (fromIntegral pid)) (Sequence 0) (PacketsSent 0) (PacketsReceived 0)
-  putStrLn "goodbye"
+  stats <- newIORef $ Stats (PacketsSent 0) (PacketsReceived 0) 
+  pingHost sock sockAddress (PID (fromIntegral pid)) (Sequence 0) stats `finally` do
+    printStats sockAddress stats
+    putStrLn "goodbye"
+
+printStats :: SockAddr -> IORef Stats -> IO()
+printStats sa s = do
+  (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef s
+  let ratio = (fromIntegral received) / (fromIntegral sent) :: Float
+  putStrLn "process terminated"
+  putStrLn $ "--- " ++ (show sa) ++ " ping statistics ---"
+  putStrLn $ (show sent) ++ " packets transmitted, " ++ (show received) ++ " packets received, " ++ (show (100 - (ratio * 100))) ++ "% packet loss"
