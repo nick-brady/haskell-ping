@@ -106,6 +106,10 @@ buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid se
     checksum :: Word16
     checksum = complement $ eac
 
+getTtl :: Get Word8
+getTtl = do
+  ttl <- getWord8
+  return ttl
 
 listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
 listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
@@ -113,19 +117,22 @@ listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
   receivedAt <- timeInMicros
   (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef stats
   let
-    (_, ipData) = B.splitAt ipHeaderLength response  -- separate IP header from the response byte string
+    (ipHeader, ipData) = B.splitAt ipHeaderLength response  -- separate IP header from the response byte string
+    (_, ttlAndRest) = B.splitAt 8 ipHeader
+    timetolive = runGet getTtl (BL.fromStrict ttlAndRest)
     (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
     (gType, gCode, gChecksum, gIdentifier, gSequence) = runGet getICMPHeader (BL.fromStrict icmpHeader)
     timestamp = runGet getICMPData (BL.fromStrict icmpData)
   case ((fromIntegral gIdentifier == pid) && sa == senderAddress) of
     True -> do -- identifiers and host matched, this is the correct ICMP Reply
       let
+        ttl = fromIntegral timetolive
         sentAt = fromIntegral timestamp
         timeDeltaInMicros = ((fromIntegral receivedAt) - sentAt)
         timeDeltaInMillis = timeDeltaInMicros / 1000
       writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
       threadDelay $ (10^6) * 1
-      _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq) ++ " time=" ++ (show timeDeltaInMillis) ++ " ms"
+      _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq) ++ " ttl=" ++ (show ttl) ++ " time=" ++ (show timeDeltaInMillis) ++ " ms"
       pingHost s sa (PID pid) (Sequence (seq + 1)) stats
     False -> do -- was a different packet, continue listening
       _ <- putStrLn $ "The identifier " ++ (show gIdentifier) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
