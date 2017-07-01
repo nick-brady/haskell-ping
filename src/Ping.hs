@@ -3,9 +3,9 @@ module Ping where
 import Control.Concurrent (threadDelay)
 import Control.Exception (finally)
 import Data.Bits
-import Data.Word (Word8, Word16, Word32)
-import Data.Binary.Get (Get, getWord8, getWord16be, isEmpty, runGet)
-import Data.Binary.Put (Put, putWord8, putWord16be, putLazyByteString, runPut)
+import Data.Word (Word8, Word16, Word32, Word64)
+import Data.Binary.Get (Get, getWord8, getWord16be, getWord32be, getWord64be, isEmpty, runGet)
+import Data.Binary.Put (Put, putWord8, putWord16be, putWord64be, putLazyByteString, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -13,8 +13,12 @@ import Network.Socket (Family(AF_INET), Socket, SocketType(Raw), SockAddr(SockAd
 import Network.Socket.ByteString (sendTo, recvFrom)
 import System.Environment (getArgs)
 import System.Posix.Process (getProcessID)
-
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Ratio (numerator)
 -- to run: >$ stack build && sudo stack exec hsping --allow-different-user
+
+timeInMicros :: IO Word64 -- use micros for its precision
+timeInMicros = fromIntegral . numerator . toRational . (* 1000000) <$> getPOSIXTime
 
 newtype PID = PID Word16
 newtype Sequence = Sequence Word16
@@ -38,7 +42,7 @@ data ICMPRequest = ICMPRequest {
   , _checksum :: Word16
   , _identifier :: Word16
   , _sequence :: Word16
-  , _data :: BL.ByteString
+  , _data :: Word64
 }
 
 data Stats = Stats PacketsSent PacketsReceived
@@ -52,6 +56,11 @@ getICMPHeader = do
   gSequence <- getWord16be
   return (gType, gCode, gChecksum, gIdentifier, gSequence)
 
+getICMPData :: Get Word64
+getICMPData = do
+  timestamp <- getWord64be
+  return timestamp
+
 writeToBuffer :: ICMPRequest -> Put
 writeToBuffer icmp = do
   putWord8 $ _type icmp
@@ -59,9 +68,9 @@ writeToBuffer icmp = do
   putWord16be $ _checksum icmp
   putWord16be $ _identifier icmp
   putWord16be $ _sequence icmp
-  putLazyByteString $ _data icmp
+  putWord64be $ _data icmp
 
-buildRequest :: PID -> Sequence -> BL.ByteString -> ICMPRequest
+buildRequest :: PID -> Sequence -> Word64 -> ICMPRequest
 buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid seq icmpdata
   where
     initialBuild :: ICMPRequest
@@ -101,16 +110,22 @@ buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid se
 listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
 listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
   (response, senderAddress) <- recvFrom s maxReceive
+  receivedAt <- timeInMicros
   (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef stats
   let
     (_, ipData) = B.splitAt ipHeaderLength response  -- separate IP header from the response byte string
     (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
     (gType, gCode, gChecksum, gIdentifier, gSequence) = runGet getICMPHeader (BL.fromStrict icmpHeader)
+    timestamp = runGet getICMPData (BL.fromStrict icmpData)
   case ((fromIntegral gIdentifier == pid) && sa == senderAddress) of
     True -> do -- identifiers and host matched, this is the correct ICMP Reply
+      let
+        sentAt = fromIntegral timestamp
+        timeDeltaInMicros = ((fromIntegral receivedAt) - sentAt)
+        timeDeltaInMillis = timeDeltaInMicros / 1000
       writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
       threadDelay $ (10^6) * 1
-      _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq)
+      _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq) ++ " time=" ++ (show timeDeltaInMillis) ++ " ms"
       pingHost s sa (PID pid) (Sequence (seq + 1)) stats
     False -> do -- was a different packet, continue listening
       _ <- putStrLn $ "The identifier " ++ (show gIdentifier) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
@@ -119,7 +134,8 @@ listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
 
 pingHost :: Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
 pingHost s sa (PID pid) (Sequence seq) stats = do
-  bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest (PID pid) (Sequence seq) icmpMockData) sa
+  time <- timeInMicros
+  bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest (PID pid) (Sequence seq) time) sa
   listenForReply bytesSent s sa (PID pid) (Sequence seq) stats 
   
 ping :: IO()
