@@ -24,6 +24,8 @@ newtype PID = PID Word16
 newtype Sequence = Sequence Word16
 newtype PacketsSent = PacketsSent Int
 newtype PacketsReceived = PacketsReceived Int
+newtype TTL = TTL Word8
+newtype ICMPData = ICMPData Word64
 
 icmpMockData :: BL.ByteString
 icmpMockData = let numBytes = 7
@@ -42,7 +44,7 @@ data ICMPRequest = ICMPRequest {
   , _checksum :: Word16
   , _identifier :: Word16
   , _sequence :: Word16
-  , _data :: Word64
+  , _data :: Word64  -- Will contain a timestamp here to calculate metrics
 }
 
 data Stats = Stats PacketsSent PacketsReceived
@@ -56,10 +58,11 @@ getICMPHeader = do
   gSequence <- getWord16be
   return (gType, gCode, gChecksum, gIdentifier, gSequence)
 
-getICMPData :: Get Word64
-getICMPData = do
-  timestamp <- getWord64be
-  return timestamp
+getTtl :: Get TTL
+getTtl = TTL <$> getWord8
+
+getICMPData :: Get ICMPData
+getICMPData = ICMPData <$> getWord64be
 
 writeToBuffer :: ICMPRequest -> Put
 writeToBuffer icmp = do
@@ -106,11 +109,6 @@ buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid se
     checksum :: Word16
     checksum = complement $ eac
 
-getTtl :: Get Word8
-getTtl = do
-  ttl <- getWord8
-  return ttl
-
 listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
 listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
   (response, senderAddress) <- recvFrom s maxReceive
@@ -119,10 +117,10 @@ listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
   let
     (ipHeader, ipData) = B.splitAt ipHeaderLength response  -- separate IP header from the response byte string
     (_, ttlAndRest) = B.splitAt 8 ipHeader
-    timetolive = runGet getTtl (BL.fromStrict ttlAndRest)
+    (TTL timetolive) = runGet getTtl (BL.fromStrict ttlAndRest)
     (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
     (gType, gCode, gChecksum, gIdentifier, gSequence) = runGet getICMPHeader (BL.fromStrict icmpHeader)
-    timestamp = runGet getICMPData (BL.fromStrict icmpData)
+    (ICMPData timestamp) = runGet getICMPData (BL.fromStrict icmpData)
   case ((fromIntegral gIdentifier == pid) && sa == senderAddress) of
     True -> do -- identifiers and host matched, this is the correct ICMP Reply
       let
@@ -166,6 +164,6 @@ printStats :: SockAddr -> IORef Stats -> IO()
 printStats sa s = do
   (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef s
   let ratio = (fromIntegral received) / (fromIntegral sent) :: Float
-  putStrLn "process terminated"
+  putStrLn " process terminated"
   putStrLn $ "--- " ++ (show sa) ++ " ping statistics ---"
   putStrLn $ (show sent) ++ " packets transmitted, " ++ (show received) ++ " packets received, " ++ (show (100 - (ratio * 100))) ++ "% packet loss"
