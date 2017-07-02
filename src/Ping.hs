@@ -17,19 +17,6 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Ratio (numerator)
 -- to run: >$ stack build && sudo stack exec hsping --allow-different-user
 
-timeInMicros :: IO Word64 -- use micros for its precision
-timeInMicros = fromIntegral . numerator . toRational . (* 1000000) <$> getPOSIXTime
-
-newtype PID = PID Word16
-newtype Sequence = Sequence Word16
-newtype PacketsSent = PacketsSent Int
-newtype PacketsReceived = PacketsReceived Int
-newtype TTL = TTL Word8
-newtype ICMPData = ICMPData Word64
-
-icmpMockData :: BL.ByteString
-icmpMockData = let numBytes = 7
-           in BL.pack [1..(8*numBytes)]
            
 maxReceive = 2048 -- maximum number of bits to receive
 ipHeaderLength = 20 -- length of IP address header in bytes
@@ -37,26 +24,50 @@ icmpHeaderLength = 8 -- length of ICMP header in bytes
 icmpProtocol :: ProtocolNumber
 icmpProtocol = 1
 
--- Build type and data constructors for a strongly typed request
-data ICMPRequest = ICMPRequest {
-    _type :: Word8
-  , _code :: Word8
-  , _checksum :: Word16
-  , _identifier :: Word16
-  , _sequence :: Word16
-  , _data :: Word64  -- Will contain a timestamp here to calculate metrics
-}
+timeInMicros :: IO Word64 -- use micros for its precision
+timeInMicros = fromIntegral . numerator . toRational . (* 1000000) <$> getPOSIXTime
 
+printStats :: SockAddr -> IORef Stats -> IO()
+printStats sa s = do
+  (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef s
+  let ratio = (fromIntegral received) / (fromIntegral sent) :: Float
+  putStrLn " process terminated"
+  putStrLn $ "--- " ++ (show sa) ++ " ping statistics ---"
+  putStrLn $ (show sent) ++ " packets transmitted, " ++ (show received) ++ " packets received, " ++ (show (100 - (ratio * 100))) ++ "% packet loss"
+
+
+newtype TTL = TTL Word8
+newtype Type = Type Word8
+newtype Code = Code Word8
+newtype Checksum = Checksum Word16
+newtype PID = PID Word16 deriving (Eq, Show)
+newtype Sequence = Sequence Word16
+newtype ICMPData = ICMPData Word64
+newtype PacketsSent = PacketsSent Int
+newtype PacketsReceived = PacketsReceived Int
+
+data ICMPHeader = ICMPHeader Type Code Checksum PID Sequence
 data Stats = Stats PacketsSent PacketsReceived
 
-getICMPHeader :: Get (Word8, Word8, Word16, Word16, Word16)
+
+-- Build type and data constructors for a strongly typed request
+data ICMPRequest = ICMPRequest {
+    _type :: Type
+  , _code :: Code
+  , _checksum :: Checksum
+  , _identifier :: PID
+  , _sequence :: Sequence
+  , _timestamp :: ICMPData  -- Will contain a timestamp here to calculate metrics
+}
+
+getICMPHeader :: Get ICMPHeader
 getICMPHeader = do
   gType <- getWord8
   gCode <- getWord8
   gChecksum <- getWord16be
   gIdentifier <- getWord16be
   gSequence <- getWord16be
-  return (gType, gCode, gChecksum, gIdentifier, gSequence)
+  return $ ICMPHeader (Type gType) (Code gCode) (Checksum gChecksum) (PID gIdentifier) (Sequence gSequence)
 
 getTtl :: Get TTL
 getTtl = TTL <$> getWord8
@@ -66,18 +77,25 @@ getICMPData = ICMPData <$> getWord64be
 
 writeToBuffer :: ICMPRequest -> Put
 writeToBuffer icmp = do
-  putWord8 $ _type icmp
-  putWord8 $ _code icmp
-  putWord16be $ _checksum icmp
-  putWord16be $ _identifier icmp
-  putWord16be $ _sequence icmp
-  putWord64be $ _data icmp
+  let
+    (Type t) = _type icmp
+    (Code co) = _code icmp
+    (Checksum ch) = _checksum icmp
+    (PID p) = _identifier icmp
+    (Sequence s) = _sequence icmp
+    (ICMPData d) = _timestamp icmp
+  putWord8 $ t
+  putWord8 $ co
+  putWord16be $ ch
+  putWord16be $ p
+  putWord16be $ s
+  putWord64be $ d
 
-buildRequest :: PID -> Sequence -> Word64 -> ICMPRequest
-buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid seq icmpdata
+buildRequest :: PID -> Sequence -> ICMPData -> ICMPRequest
+buildRequest (PID pid) (Sequence seq) (ICMPData icmpdata) = ICMPRequest (Type 8) (Code 0) (Checksum checksum) (PID pid) (Sequence seq) (ICMPData icmpdata)
   where
     initialBuild :: ICMPRequest
-    initialBuild = ICMPRequest 8 0 0 pid seq icmpdata
+    initialBuild = ICMPRequest (Type 8) (Code 0) (Checksum 0) (PID pid) (Sequence seq) (ICMPData icmpdata)
 
     -- "If the total length is odd, the received data is padded with one
     -- octet of zeros for computing the checksum." - RFC 792
@@ -110,7 +128,7 @@ buildRequest (PID pid) (Sequence seq) icmpdata = ICMPRequest 8 0 checksum pid se
     checksum = complement $ eac
 
 listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
-listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
+listenForReply bytesSent s sa pid (Sequence seq) stats = do
   (response, senderAddress) <- recvFrom s maxReceive
   receivedAt <- timeInMicros
   (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef stats
@@ -119,9 +137,9 @@ listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
     (_, ttlAndRest) = B.splitAt 8 ipHeader
     (TTL timetolive) = runGet getTtl (BL.fromStrict ttlAndRest)
     (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
-    (gType, gCode, gChecksum, gIdentifier, gSequence) = runGet getICMPHeader (BL.fromStrict icmpHeader)
+    (ICMPHeader _ _ _ replyPID _) = runGet getICMPHeader (BL.fromStrict icmpHeader)
     (ICMPData timestamp) = runGet getICMPData (BL.fromStrict icmpData)
-  case ((fromIntegral gIdentifier == pid) && sa == senderAddress) of
+  case ((replyPID == pid) && sa == senderAddress) of
     True -> do -- identifiers and host matched, this is the correct ICMP Reply
       let
         ttl = fromIntegral timetolive
@@ -131,16 +149,16 @@ listenForReply bytesSent s sa (PID pid) (Sequence seq) stats = do
       writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
       threadDelay $ (10^6) * 1
       _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq) ++ " ttl=" ++ (show ttl) ++ " time=" ++ (show timeDeltaInMillis) ++ " ms"
-      pingHost s sa (PID pid) (Sequence (seq + 1)) stats
+      pingHost s sa pid (Sequence (seq + 1)) stats
     False -> do -- was a different packet, continue listening
-      _ <- putStrLn $ "The identifier " ++ (show gIdentifier) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
-      listenForReply bytesSent s sa (PID pid) (Sequence seq) stats
+      _ <- putStrLn $ "The identifier " ++ (show replyPID) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
+      listenForReply bytesSent s sa pid (Sequence seq) stats
 
 
 pingHost :: Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
 pingHost s sa (PID pid) (Sequence seq) stats = do
   time <- timeInMicros
-  bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest (PID pid) (Sequence seq) time) sa
+  bytesSent <- sendTo s ((B.concat . BL.toChunks . runPut . writeToBuffer) $ buildRequest (PID pid) (Sequence seq) (ICMPData time)) sa
   listenForReply bytesSent s sa (PID pid) (Sequence seq) stats 
   
 ping :: IO()
@@ -160,10 +178,3 @@ ping = do
         printStats sockAddress stats
         putStrLn "goodbye"
 
-printStats :: SockAddr -> IORef Stats -> IO()
-printStats sa s = do
-  (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef s
-  let ratio = (fromIntegral received) / (fromIntegral sent) :: Float
-  putStrLn " process terminated"
-  putStrLn $ "--- " ++ (show sa) ++ " ping statistics ---"
-  putStrLn $ (show sent) ++ " packets transmitted, " ++ (show received) ++ " packets received, " ++ (show (100 - (ratio * 100))) ++ "% packet loss"
