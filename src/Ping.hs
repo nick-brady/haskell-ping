@@ -51,8 +51,6 @@ newtype PacketsReceived = PacketsReceived Int
 data ICMPHeader = ICMPHeader Type Code Checksum PID Sequence
 data Stats = Stats PacketsSent PacketsReceived
 
-
--- Build type and data constructors for a strongly typed request
 data ICMPRequest = ICMPRequest {
     _type :: Type
   , _code :: Code
@@ -151,13 +149,16 @@ listenForReply bytesSent s sa pid (Sequence seq) stats = do
           sentAt = fromIntegral timestamp
           timeDeltaInMicros = ((fromIntegral receivedAt) - sentAt)
           timeDeltaInMillis = timeDeltaInMicros / 1000
-        writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
-        threadDelay $ second
-        _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq) ++ " ttl=" ++ (show ttl) ++ " time=" ++ (show timeDeltaInMillis) ++ " ms"
+        _ <- writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
+        _ <- threadDelay $ second
+        _ <- putStr $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress)
+        _ <- putStr $ ": icmp_seq=" ++ (show seq) ++ " ttl=" ++ (show ttl)
+        _ <- putStrLn $ " time=" ++ (show timeDeltaInMillis) ++ " ms"
         pingHost s sa pid (Sequence (seq + 1)) stats
       else do -- was a different packet, continue listening
-          _ <- putStrLn $ "The identifier " ++ (show replyPID) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
-          listenForReply bytesSent s sa pid (Sequence seq) stats
+        _ <- putStr $ "The identifier " ++ (show replyPID) ++ " does not match PID "
+        _ <- putStrLn $ (show pid) ++ ". Continue listening for correct ICMP packet"
+        listenForReply bytesSent s sa pid (Sequence seq) stats
     Nothing -> do 
       putStrLn "timed out waiting for a reply"
       writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received)))
