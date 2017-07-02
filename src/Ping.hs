@@ -129,7 +129,6 @@ buildRequest pid seq icmpdata = ICMPRequest (Type 8) (Code 0) (Checksum checksum
 
 listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
 listenForReply bytesSent s sa pid (Sequence seq) stats = do
-  -- (response, senderAddress) <- recvFrom s maxReceive
   response <- timeout second (recvFrom s maxReceive)
   (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef stats
   case response of
