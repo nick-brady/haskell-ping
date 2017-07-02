@@ -92,10 +92,10 @@ writeToBuffer icmp = do
   putWord64be $ d
 
 buildRequest :: PID -> Sequence -> ICMPData -> ICMPRequest
-buildRequest (PID pid) (Sequence seq) (ICMPData icmpdata) = ICMPRequest (Type 8) (Code 0) (Checksum checksum) (PID pid) (Sequence seq) (ICMPData icmpdata)
+buildRequest pid seq icmpdata = ICMPRequest (Type 8) (Code 0) (Checksum checksum) pid seq icmpdata
   where
     initialBuild :: ICMPRequest
-    initialBuild = ICMPRequest (Type 8) (Code 0) (Checksum 0) (PID pid) (Sequence seq) (ICMPData icmpdata)
+    initialBuild = ICMPRequest (Type 8) (Code 0) (Checksum 0) pid seq icmpdata
 
     -- "If the total length is odd, the received data is padded with one
     -- octet of zeros for computing the checksum." - RFC 792
