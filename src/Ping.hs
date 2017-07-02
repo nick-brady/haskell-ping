@@ -3,21 +3,23 @@ module Ping where
 import Control.Concurrent (threadDelay)
 import Control.Exception (finally)
 import Data.Bits
-import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Binary.Get (Get, getWord8, getWord16be, getWord32be, getWord64be, isEmpty, runGet)
 import Data.Binary.Put (Put, putWord8, putWord16be, putWord64be, putLazyByteString, runPut)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Ratio (numerator)
+import Data.Word (Word8, Word16, Word32, Word64)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Network.Socket (Family(AF_INET), Socket, SocketType(Raw), SockAddr(SockAddrInet),addrAddress,addrFamily, addrProtocol, addrSocketType, ProtocolNumber, connect,isConnected, getAddrInfo, socket, close)
 import Network.Socket.ByteString (sendTo, recvFrom)
 import System.Environment (getArgs)
 import System.Posix.Process (getProcessID)
-import Data.Time.Clock.POSIX (getPOSIXTime)
-import Data.Ratio (numerator)
+import System.Timeout (timeout)
+
 -- to run: >$ stack build && sudo stack exec hsping --allow-different-user
 
-           
+second = 10^6
 maxReceive = 2048 -- maximum number of bits to receive
 ipHeaderLength = 20 -- length of IP address header in bytes
 icmpHeaderLength = 8 -- length of ICMP header in bytes
@@ -129,30 +131,37 @@ buildRequest pid seq icmpdata = ICMPRequest (Type 8) (Code 0) (Checksum checksum
 
 listenForReply :: Int -> Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
 listenForReply bytesSent s sa pid (Sequence seq) stats = do
-  (response, senderAddress) <- recvFrom s maxReceive
-  receivedAt <- timeInMicros
+  -- (response, senderAddress) <- recvFrom s maxReceive
+  response <- timeout second (recvFrom s maxReceive)
   (Stats (PacketsSent sent) (PacketsReceived received)) <- readIORef stats
-  let
-    (ipHeader, ipData) = B.splitAt ipHeaderLength response  -- separate IP header from the response byte string
-    (_, ttlAndRest) = B.splitAt 8 ipHeader
-    (TTL timetolive) = runGet getTtl (BL.fromStrict ttlAndRest)
-    (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
-    (ICMPHeader _ _ _ replyPID _) = runGet getICMPHeader (BL.fromStrict icmpHeader)
-    (ICMPData timestamp) = runGet getICMPData (BL.fromStrict icmpData)
-  case ((replyPID == pid) && sa == senderAddress) of
-    True -> do -- identifiers and host matched, this is the correct ICMP Reply
+  case response of
+    Just ((reply, senderAddress)) -> do
+      receivedAt <- timeInMicros
       let
-        ttl = fromIntegral timetolive
-        sentAt = fromIntegral timestamp
-        timeDeltaInMicros = ((fromIntegral receivedAt) - sentAt)
-        timeDeltaInMillis = timeDeltaInMicros / 1000
-      writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
-      threadDelay $ (10^6) * 1
-      _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq) ++ " ttl=" ++ (show ttl) ++ " time=" ++ (show timeDeltaInMillis) ++ " ms"
+        (ipHeader, ipData) = B.splitAt ipHeaderLength reply  -- separate IP header from the response byte string
+        (_, ttlAndRest) = B.splitAt 8 ipHeader
+        (TTL timetolive) = runGet getTtl (BL.fromStrict ttlAndRest)
+        (icmpHeader, icmpData) = B.splitAt icmpHeaderLength ipData -- separate ICMP header from the ICMP reply packet
+        (ICMPHeader _ _ _ replyPID _) = runGet getICMPHeader (BL.fromStrict icmpHeader)
+        (ICMPData timestamp) = runGet getICMPData (BL.fromStrict icmpData)
+      if ((replyPID == pid) && sa == senderAddress)
+      then do -- identifiers and host matched, this is the correct ICMP Reply
+        let
+          ttl = fromIntegral timetolive
+          sentAt = fromIntegral timestamp
+          timeDeltaInMicros = ((fromIntegral receivedAt) - sentAt)
+          timeDeltaInMillis = timeDeltaInMicros / 1000
+        writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received + 1)))
+        threadDelay $ second
+        _ <- putStrLn $ (show bytesSent) ++ " bytes sent from " ++ (show senderAddress) ++ ": icmp_seq=" ++ (show seq) ++ " ttl=" ++ (show ttl) ++ " time=" ++ (show timeDeltaInMillis) ++ " ms"
+        pingHost s sa pid (Sequence (seq + 1)) stats
+      else do -- was a different packet, continue listening
+          _ <- putStrLn $ "The identifier " ++ (show replyPID) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
+          listenForReply bytesSent s sa pid (Sequence seq) stats
+    Nothing -> do 
+      putStrLn "timed out waiting for a reply"
+      writeIORef stats (Stats (PacketsSent (sent + 1)) (PacketsReceived (received)))
       pingHost s sa pid (Sequence (seq + 1)) stats
-    False -> do -- was a different packet, continue listening
-      _ <- putStrLn $ "The identifier " ++ (show replyPID) ++ " does not match PID " ++ (show pid) ++ ". Continue listening for correct ICMP packet"
-      listenForReply bytesSent s sa pid (Sequence seq) stats
 
 
 pingHost :: Socket -> SockAddr -> PID -> Sequence -> IORef Stats -> IO()
