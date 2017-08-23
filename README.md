@@ -5,6 +5,28 @@ Program will send an ICMP (Internet Control Message Protocol) echo request to a 
 
 Helpful high level overview of ping here: http://images.globalknowledge.com/wwwimages/whitepaperpdf/WP_Mays_Ping.pdf
 
+## Building a binary
+ 
+Note: assumes you have downloaded and installed `stack`
+```
+stack build
+```
+The binary will be built and added to `haskell-ping/.stack-work/install/x86_64-osx/lts-8.19/8.0.2/bin`
+
+## Run the binary
+
+Note: Must use `sudo` because a raw socket is being opened which requires admin priveledges
+
+`stack exec` offers an easy way to execute the binary from the project dir without navigating to where the binary was put.
+```
+sudo stack exec hsping 127.0.0.1 --allow-different-user
+```
+You may of course also execute the binary directly.
+```
+cd .stack-work/install/x86_64-osx/lts-8.19/8.0.2/bin
+sudo ./hsping 127.0.0.1
+```
+
 ## ICMP Echo Request
 From http://www.networksorcery.com/enp/protocol/icmp/msg8.htm#ICMP%20Header%20Checksum
 
